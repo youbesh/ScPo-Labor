@@ -3,7 +3,9 @@ title: "Static Labor Supply"
 ---
 
 ```{r setup, include=FALSE}
+install.packages("knitr")
 knitr::opts_chunk$set(echo = TRUE)
+install.packages(c("testthat","xtable","ggplot2","pander", "data.table"))
 require(testthat)
 require(xtable)
 require(pander)
@@ -122,23 +124,242 @@ pander(sfit)
 # Short Panel version 
 
  **Q1:** Take the simulated data from the model with heterogenous $\beta_i$. First explain why regressing $\log(w)$ on $\log(c)$, $\log(h)$, and $X$ does not deliver correct estimates.
+
+#Q1 Answer
+Heterogeniety in discount factor means that for same gamma, same eta, same wage, same taxes and same non-labor income, people make different $h$ (and hence $c$) decisions. So if we do not control for $\beta_i$ in the regression, there's an omitted variable bias ($corr(\beta_i, c) \neq 0, corr(\beta_i, h) \neq 0$), and it yields misleading results, different from the values we set for $\gamma$ and $\eta$ when simulating the data at first. 
+ 
  **Q2:** Simulate 2 periods of the model (a short panel), keep everything fixed over the 2 periods, but redraw the wage. Estimate the model in differences and recover the parameters using $\log(w)$ on $\log(c)$, $\log(h)$. How does including or not including participation decision affect the results? Explain.
  
+```{r, results="hide"}
+simdata[,lw2 := X     + rnorm(N)*0.2]; 
+simdata[, h2 := pmax(-mu+tx$r + p$beta0 ,0)/exp(lw2)+1]
+for (i in 1:30) {
+  simdata[, h2 := ff.newt(h2,tx$rho*exp(lw2),mu-tx$r-p$beta0,p$eta,p$gamma,betai) ]
+}
+
+simdata[, c2  := exp(lw2)*h2 + mu - p$beta0];
+simdata[, u12 := c^(1+p$eta)/(1+p$eta) - betai * h2^(1+p$gamma)/(1+p$gamma) ];
+simdata[, u02:=  mu^(1+p$eta)/(1+p$eta)];
+simdata[,p2:=u12>u02];
+simdata[, dlw  := lw2 - lw];
+simdata[, dc  := log(c2) - log(c)];
+simdata[, dh  := log(h2) - log(h)]
+
+
+sfit2 = summary(simdata[,lm(dlw ~ dc + dh)])
+
+sfit3 = summary(simdata[p1==TRUE & p2==TRUE,lm(dlw ~ dc + dh)])
+
+```
+
+Results when including everyone
+```{r, ,results='asis'}
+pander(sfit2)
+```
+
+Results when including only those who participate
+```{r, ,results='asis'}
+pander(sfit3)
+```
+# Q2
+We still recover the estimates, the intercept becomes more significant when we only work with those who participate... Not sure why...
+
+
 # Repeated cross-section version
 
 In this section we want to get closer to the Blundell, Duncan and Meghir (1998) exercice. We first modify the cost to allow for an increase return to X, and for the presence of a change in the tax rate. Simulate wages according to:
 
-```r
+```{r}
   simdata[,lw := lb*X + rnorm(N)*0.2];      # add a wage which depends on X
 ```
 
 Write a function that can simulate a full cross section and that takes `lb` as inpute as well as marginal tax rate $\rho$. It should apply the same function as before to solve for the interior solution, but use the after-tax wage every where.
 
  **Q3:** simulate two cross-sections with $(lb=1,\rho=1)$ and $(lb=1.5,\rho=0.8)$ and use 10k indivduals. Simulate data without participation decision for now. Combine the data and show that previous regression provides biased estimates. Then slice X into K categories (for example using quantiles). Then compute $\log(w)$, $\log(c)$ and $\log(h)$ within each group and time period. Run the regression in first differences and show that this recovers the structural parameters.
+ 
+```{r}
+ff.sim <- function(data.table, lb, rho) {
+
+data.table[,betai := exp(0.5*X+rnorm(N)*0.1)]
+
+data.table[,lw := lb*X + rnorm(N)*0.2];      #wage which depends on X
+data.table[,mu := exp(0.3*X + rnorm(N)*0.2)]; #non-labor income that also depends on X
+
+# we then solve for the choice of hours and consumption
+data.table[, h := pmax(-mu+tx$r + p$beta0 ,0)/(rho*exp(lw))+1]
+# for loop for newton method (30 should be enough, it is fast)
+for (i in 1:30) {
+  data.table[, h := ff.newt(h,rho*exp(lw),mu-tx$r-p$beta0,p$eta,p$gamma,betai) ]
+}
+data.table[, c  := rho*exp(lw)*h + mu - p$beta0];
+data.table[, u1 := c^(1+p$eta)/(1+p$eta) - betai * h^(1+p$gamma)/(1+p$gamma) ];
+data.table[, u0:=  mu^(1+p$eta)/(1+p$eta)];
+data.table[,p1:=u1>u0]
+}
+
+N=10000
+simdata_31 = data.table(i=1:N,X=rnorm(N))
+simdata_31[, t  := 1]
+simdata_32 = data.table(i=1:N,X=rnorm(N))
+simdata_32[, t  := 2]
+
+ff.sim(simdata_31, 1,1)
+ff.sim(simdata_32, 1.5,0.8)
+
+grouped = rbind(simdata_31, simdata_32)
+
+```
+#Q3, combining data
+
+```{r}
+pander(summary(grouped[,lm(lw ~ log(c) + log(h))]))
+``` 
+Combining the data produces very biased results. People were subject to different taxes and different wages, and they're not even the same (it's not panel) so obviously the regression doesn't make sense, many omitted variables. 
+ 
+#Slicing
+
+```{r}
+simdata_31[, decile := cut(X, breaks=quantile(X, probs=seq(0,1, by=0.1)), labels(1:10))]
+
+simdata_32[, decile := cut(X, breaks=quantile(X, probs=seq(0,1, by=0.1)), labels(1:10))]
+
+
+avg_w1 = aggregate(lw ~ simdata_31$decile, data=simdata_31, FUN= function(x) c(mean = mean(x)))
+avg_c1 = aggregate(log(c) ~ simdata_31$decile, data=simdata_31, FUN= function(x) c(mean = mean(x)))
+avg_h1 = aggregate(log(h) ~ simdata_31$decile, data=simdata_31, FUN= function(x) c(mean = mean(x)))
+
+avg_w2 = aggregate(lw ~ simdata_32$decile, data=simdata_32, FUN= function(x) c(mean = mean(x)))
+avg_c2 = aggregate(log(c) ~ simdata_32$decile, data=simdata_32, FUN= function(x) c(mean = mean(x)))
+avg_h2 = aggregate(log(h) ~ simdata_32$decile, data=simdata_32, FUN= function(x) c(mean = mean(x)))
+
+#Difference
+ddw = avg_w2$lw - avg_w1$lw
+ddc = avg_c2$`log(c)`-avg_c1$`log(c)`
+ddh = avg_h2$`log(h)`- avg_h1$`log(h)`
+
+pander(summary(lm(ddw ~ ddc + ddh)))
+```
+ 
+ We recover the structural parameters with pretty good precision when slice into deciles. 
+ 
 
  **Q4:** Add the participation decision to the data generating process. Show that the results are now biased.
  
- **Q5:** Extend the model to add an excluded variable that affects participation through $\mu$ but not the wage (keep X everywhere). Devise a way improve the estimates by controling for participation.
+
+```{r}
+#Removing those who don't participate first, before creating deciles
+simdata_31p = subset(simdata_31, p1 == TRUE)
+simdata_32p = subset(simdata_32, p1 == TRUE)
+
+
+simdata_31p[, decilep := cut(X, breaks=quantile(X, probs=seq(0,1, by=0.1)), labels(1:10))]
+
+simdata_32p[, decilep := cut(X, breaks=quantile(X, probs=seq(0,1, by=0.1)), labels(1:10))]
+
+
+avg_w1p = aggregate(lw ~ simdata_31p$decilep, data=simdata_31p, FUN= function(x) c(mean = mean(x)))
+
+avg_c1p = aggregate(log(c) ~ simdata_31p$decilep, data=simdata_31p, FUN= function(x) c(mean = mean(x)))
+
+avg_h1p = aggregate(log(h) ~ simdata_31p$decilep, data=simdata_31p, FUN= function(x) c(mean = mean(x)))
+
+avg_w2p = aggregate(lw ~ simdata_32p$decilep, data=simdata_32p, FUN= function(x) c(mean = mean(x)))
+
+avg_c2p = aggregate(log(c) ~ simdata_32p$decilep, data=simdata_32p, FUN= function(x) c(mean = mean(x)))
+
+avg_h2p = aggregate(log(h) ~ simdata_32p$decilep, data=simdata_32p, FUN= function(x) c(mean = mean(x)))
+
+
+#Difference
+ddwp = avg_w2p$lw - avg_w1p$lw
+ddcp = avg_c2p$`log(c)`-avg_c1p$`log(c)`
+ddhp = avg_h2p$`log(h)`- avg_h1p$`log(h)`
+
+pander(summary(lm(ddwp ~ ddcp + ddhp)))
+
+```
+#Q4
+The results are biased since we are not observing the behavior of those who chose not to work, we excluded them from each bin. Especially $\gamma$'s estimate is bad, most vulnerable to adding participation.
+ 
+ 
+ 
+ **Q5:** Extend the model to add an excluded variable that affects participation through $\mu$ but not the wage (keep X everywhere). Devise a way to improve the estimates by controling for participation.
+```{r}
+N=10000
+
+ff.sim5 <- function(data.table, lb, rho) {
+
+data.table[,betai := exp(0.5*X+rnorm(N)*0.1)]
+
+data.table[,lw := lb*X + rnorm(N)*0.2];      #wage which depends on X
+data.table[,mu := exp(0.3*X + rnorm(N)*0.2 + 0.5*Z)]; #non-labor income that also depends on X
+
+# we then solve for the choice of hours and consumption
+data.table[, h := pmax(-mu+tx$r + p$beta0 ,0)/(rho*exp(lw))+1]
+# for loop for newton method (30 should be enough, it is fast)
+for (i in 1:30) {
+  data.table[, h := ff.newt(h,rho*exp(lw),mu-tx$r-p$beta0,p$eta,p$gamma,betai) ]
+}
+data.table[, c  := rho*exp(lw)*h + mu - p$beta0];
+data.table[, u1 := c^(1+p$eta)/(1+p$eta) - betai * h^(1+p$gamma)/(1+p$gamma) ];
+data.table[, u0:=  mu^(1+p$eta)/(1+p$eta)];
+data.table[,p1:=u1>u0]
+}
+
+simdata_51 = data.table(i=1:N,X=rnorm(N), Z=rnorm(N))
+
+
+cr51 = ff.sim5(simdata_51, 1,1)
+
+pander(summary(cr51[,lm(lw ~ log(c) + log(h) + Z)]))
+
+```
+#Q5, before differencing
+Z is a standard normal variable, that I added in $\mu$'s expression.
+We get biased results, even controlling for Z, again it's not panel. Now we try differences, same as before. 
+
+```{r}
+simdata_52 = data.table(i=1:N,X=rnorm(N), Z=rnorm(N))
+
+cr52 = ff.sim5(simdata_52, 1.5,0.8)
+
+cr51[, decile := cut(X, breaks=quantile(X, probs=seq(0,1, by=0.1)), labels(1:10))]
+
+cr52[, decile := cut(X, breaks=quantile(X, probs=seq(0,1, by=0.1)), labels(1:10))]
+
+
+avg_w15 = aggregate(lw ~ cr51$decile, data=cr51, FUN= function(x) c(mean = mean(x)))
+avg_c15 = aggregate(log(c) ~ cr51$decile, data=cr51, FUN= function(x) c(mean = mean(x)))
+avg_h15 = aggregate(log(h) ~ cr51$decile, data=cr51, FUN= function(x) c(mean = mean(x)))
+
+avg_w25 = aggregate(lw ~ cr52$decile, data=cr52, FUN= function(x) c(mean = mean(x)))
+avg_c25 = aggregate(log(c) ~ cr52$decile, data=cr52, FUN= function(x) c(mean = mean(x)))
+avg_h25 = aggregate(log(h) ~ cr52$decile, data=cr52, FUN= function(x) c(mean = mean(x)))
+
+#averages also for Z, to control for it in the regression
+avg_Z1 = aggregate(Z ~ cr51$decile, data=cr51, FUN= function(x) c(mean = mean(x)))
+
+avg_Z2 = aggregate(Z ~ cr52$decile, data=cr52, FUN= function(x) c(mean = mean(x)))
+
+#Difference
+dw5 = avg_w25$lw - avg_w15$lw
+dc5 = avg_c25$`log(c)`-avg_c15$`log(c)`
+dh5 = avg_h25$`log(h)`- avg_h15$`log(h)`
+dz = avg_Z2$Z - avg_Z1$Z
+
+pander(summary(lm(dw5 ~ dc5 + dh5)))
+```
+
+Estimates improve a lot when we difference, we almost recover parameters, same reason as before. Even though deciles are according to X, we average within each bin and this controls for people's heterogeneity that influences their participation, including along their heterogenity along $Z$. 
+
+Just to see if it matters, we control for the difference in z within each decile.
+It shouldn't really, coz we averaged in each bin...
+```{r}
+pander(summary(lm(dw5 ~ dc5 + dh5 + dz)))
+```
+
+We still recover the parameters with satisfactory precision, and coefficient on dz is not significant anyhow. 
+
  
 
 
